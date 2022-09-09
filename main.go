@@ -14,27 +14,54 @@ import (
 	flags "github.com/jessevdk/go-flags"
 )
 
-type MatchStatus bool
+type Job struct {
+	Url        string
+	Method     string
+	HeaderName string
+	RegexMatch *regexp.Regexp
+}
 
-func checkServer(url, method, headerKey string, valueRegex *regexp.Regexp, httpClient *http.Client, output chan<- string) (ms MatchStatus) {
-	ms = MatchStatus(false)
+type JobResult struct {
+	Url           string
+	MatchedString string
+	StatusCode    int
+	Success       bool
+}
+
+func NewHttpClient(timeout int) (c http.Client) {
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	c = http.Client{Timeout: time.Duration(timeout) * time.Second}
+	return
+}
+
+func checkServer(url, method, headerKey string, valueRegex *regexp.Regexp, timeout int) (result JobResult) {
+	client := NewHttpClient(timeout)
 	req, err := http.NewRequest(method, url, nil)
 
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalln(err)
+		result = JobResult{Success: false}
+		return
 	}
 
-	fmt.Println("Checing", url)
 	if val, ok := resp.Header[headerKey]; ok {
 		joinedHeaders := []byte(strings.Join(val, " "))
-		if MatchStatus(valueRegex.Match(joinedHeaders)) {
-			output <- fmt.Sprintf("%s:%s", url, joinedHeaders)
+		if valueRegex.Match(joinedHeaders) {
+			result = JobResult{
+				Url:           url,
+				Success:       true,
+				MatchedString: string(joinedHeaders),
+				StatusCode:    resp.StatusCode,
+			}
 		}
 	}
-
-	output <- ""
 	return
+}
+
+func worker(id, timeout int, jobs <-chan Job, results chan<- JobResult) {
+	for j := range jobs {
+		results <- checkServer(j.Url, j.Method, j.HeaderName, j.RegexMatch, timeout)
+	}
 }
 
 func main() {
@@ -45,19 +72,12 @@ func main() {
 		File        string `short:"w" long:"targets-file" description:"Path to a newline seperated targets" required:"true"`
 		HeaderName  string `short:"k" long:"header-key" description:"Response Header Key To Match"  required:"true"`
 		HeaderRegex string `short:"r" long:"regex-value" description:"Response header value regex to match for" required:"true"`
+		WorkerNum   int    `short:"n" long:"worker-num" description:"Number of workers"`
 	}
 	_, err := flags.Parse(&opts)
 	if err != nil {
 		return
 	}
-
-	// compiling regex
-	regExpr, _ := regexp.Compile(opts.HeaderRegex)
-	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	c := http.Client{Timeout: time.Duration(opts.Timeout) * time.Second}
-
-	targetCounter := 0
-	outputStatusesChannel := make(chan string)
 
 	// reading targets file
 	file, err := os.Open(opts.File)
@@ -66,24 +86,40 @@ func main() {
 	}
 	defer file.Close()
 
-	// For each target in file create a goroutine
+	// getting urls
+	var targetUrls []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		currTarget := scanner.Text()
-		go checkServer(currTarget, opts.Method, opts.HeaderName, regExpr, &c, outputStatusesChannel)
-		targetCounter++
+		targetUrls = append(targetUrls, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
 
-	// collect success statuses and print
-	for targetCounter > 0 {
-		fmt.Printf("%d\n", targetCounter)
-		status := <-outputStatusesChannel
-		if status != "" {
-			fmt.Println("Matched:", status)
+	regExpr, _ := regexp.Compile(opts.HeaderRegex)
+
+	// starting workers
+	jobs := make(chan Job, len(targetUrls))
+	results := make(chan JobResult, len(targetUrls))
+
+	for w := 1; w <= opts.WorkerNum; w++ {
+		go worker(w, opts.Timeout, jobs, results)
+	}
+
+	for _, url := range targetUrls {
+		jobs <- Job{
+			Url:        url,
+			Method:     opts.Method,
+			HeaderName: opts.HeaderName,
+			RegexMatch: regExpr,
 		}
-		targetCounter--
+	}
+
+	for i := 0; i <= len(targetUrls); i++ {
+		res := <-results
+
+		if res.Success {
+			fmt.Println(res.Url, res.MatchedString)
+		}
 	}
 }
