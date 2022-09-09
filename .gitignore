@@ -1,0 +1,4 @@
+*.exe
+bin/*
+go.sum
+*.txt

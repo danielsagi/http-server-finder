@@ -12,6 +12,7 @@ import (
 	"time"
 
 	flags "github.com/jessevdk/go-flags"
+	"github.com/schollz/progressbar/v3"
 )
 
 type Job struct {
@@ -70,6 +71,7 @@ func main() {
 		Timeout     int    `short:"t" long:"timeout" description:"HTTP Timeout"`
 		Method      string `short:"X" long:"method" description:"HTTP Method to use" required:"true"`
 		File        string `short:"w" long:"targets-file" description:"Path to a newline seperated targets" required:"true"`
+		OutFile     string `short:"o" long:"out-file" description:"Path to the output file" required:"true"`
 		HeaderName  string `short:"k" long:"header-key" description:"Response Header Key To Match"  required:"true"`
 		HeaderRegex string `short:"r" long:"regex-value" description:"Response header value regex to match for" required:"true"`
 		WorkerNum   int    `short:"n" long:"worker-num" description:"Number of workers"`
@@ -115,11 +117,21 @@ func main() {
 		}
 	}
 
+	bar := progressbar.Default(int64(len(targetUrls)))
+
+	// Output fetching
+	fo, err := os.Create(opts.OutFile)
+	if err != nil {
+		panic(err)
+	}
+	defer fo.Close()
+
 	for i := 0; i <= len(targetUrls); i++ {
 		res := <-results
-
+		bar.Add(1)
 		if res.Success {
-			fmt.Println(res.Url, res.MatchedString)
+			fo.WriteString(fmt.Sprintf("%s - %s\n", res.Url, res.MatchedString))
 		}
 	}
+
 }
